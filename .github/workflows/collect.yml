@@ -1,0 +1,62 @@
+name: Collect crypto snapshot
+
+on:
+  schedule:
+    - cron: '0 * * * *'      # hourly, UTC
+  workflow_dispatch:          # lets you trigger a test run from the Actions tab
+
+permissions:
+  contents: write             # required for the bot to push the updated CSV
+
+concurrency:
+  group: collect
+  cancel-in-progress: false   # queue overlapping runs rather than dropping data
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Fetch snapshot
+        env:
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: python collect.py
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- data/crypto_data.csv; then
+            echo "no change; nothing to commit"
+            exit 0
+          fi
+
+          git add data/crypto_data.csv
+          git commit -m "snapshot $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          # Another run may have pushed while this one was fetching.
+          for i in 1 2 3 4 5; do
+            if git push; then
+              echo "pushed on attempt $i"
+              exit 0
+            fi
+            echo "push rejected, rebasing (attempt $i)"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            sleep 5
+          done
+
+          echo "push failed after 5 attempts" >&2
+          exit 1
